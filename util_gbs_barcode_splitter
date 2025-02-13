@@ -1,0 +1,133 @@
+#!/usr/bin/perl -w
+
+use strict;
+use Getopt::Long;
+use IO::Compress::Gzip qw(gzip $GzipError) ;
+
+my $barcode_file;
+my $read1_fq;
+my $read2_fq;
+my $restr_length;
+
+GetOptions("barcode_file=s" => \$barcode_file,
+    "1=s" => \$read1_fq,
+    "2=s" => \$read2_fq,
+    "restr_length=i" => \$restr_length);
+
+unless (defined $barcode_file && defined $read1_fq && defined $read2_fq) {
+
+print<<EOF;
+Usage:
+    util_gbs_barcode_splitter
+        --barcode_file  [-b]   barcode file
+        --1             [-1]   READ1 of PE
+        --2             [-2]   READ2 of PE
+        --restr_length  [-r]   RestrictionSite1 offset (default : 4)
+
+EOF
+exit 1;
+}
+
+unless (defined $restr_length) {$restr_length=4;}
+
+die "Error: cannot open Read1\n" unless (-f $read1_fq);
+die "Error: cannot open Read2\n" unless (-f $read2_fq);
+
+open(BC,"<".$barcode_file) || die "Error: cannot open barcode file\n";
+open(Q1,"zcat $read1_fq |");
+open(Q2,"zcat $read2_fq |");
+open(U1,">unmatched_1") || die "Error: cannot write unmatched\n";
+open(U2,">unmatched_2") || die "Error: cannot write unmatched\n";
+
+
+my %barcodes;
+my %out_stats;
+my $min_bc_length=100;
+my $max_bc_length=0;
+my $total_rcount =0;
+my $total_pcount =0;
+
+while(<BC>) {
+    chomp;
+    my ($bc,$seq)  = (split("\t",$_));
+    $barcodes{$seq}= $bc;
+    $out_stats{$seq} = {
+        barcode => $bc,
+        seq     => $seq,
+        rcount  => 0
+        };
+
+    $min_bc_length = length($seq) if (length($seq) < $min_bc_length);
+    $max_bc_length = length($seq) if (length($seq) > $max_bc_length);
+}
+print "Found shortest barcode length : $min_bc_length\n";
+print "Found  longest barcode length : $max_bc_length\n";
+close BC;
+
+my %fhs = get_write_handles(values %barcodes);
+
+
+my %seen=();
+while(<Q1>) {
+    my $q1    = $_;
+    my $seq1  = <Q1>;
+    my $qq1   = <Q1>;
+    my $qual1 = <Q1>;
+    my $q2    = <Q2>;
+    my $seq2  = <Q2>;
+    my $qq2   = <Q2>;
+    my $qual2 = <Q2>;
+    
+    $total_rcount++;
+    my $printed = 0;
+
+    for(my $i = $min_bc_length; $i<= $max_bc_length; $i++){
+        my $code = substr($seq1,0,$i);
+        my $off_set = length($code)-$restr_length;
+        if (exists($barcodes{$code})) {
+            my $pe1 = $fhs{$barcodes{$code}."_1"};
+            my $pe2 = $fhs{$barcodes{$code}."_2"};
+            $out_stats{$code}{rcount}+=1;
+            $total_pcount++;
+            $seq1 = substr($seq1,$off_set);
+            $qual1 = substr($qual1,$off_set);
+
+            print $pe1 $q1.$seq1.$qq1.$qual1;
+            print $pe2 $q2.$seq2.$qq2.$qual2;
+            $i = $max_bc_length+1;
+            $printed = 1;
+            next;
+        }
+    }
+    if (!$printed) {
+        print U1 $q1.$seq1.$qq1.$qual1;
+        print U2 $q2.$seq2.$qq2.$qual2;
+    }
+}
+print "\n";
+
+foreach my $seq (keys %out_stats) {
+    my $stats = $out_stats{$seq};
+    print join("\t",$stats->{barcode},$stats->{seq},$stats->{rcount})."\n";
+}
+print "Total reads in PE files: $total_rcount \n";
+print "Total partitioned reads: $total_pcount \n";
+print "Percentage partitioned : ".sprintf("%.1f",$total_pcount/$total_rcount*100)."%\n";
+
+
+close Q1;
+close Q2;
+
+sub get_write_handles {
+    my @file_names = @_;
+    my %file_handles;
+    foreach (@file_names) {
+        my $fh1 = new IO::Compress::Gzip $_."_1.gz" or next;
+        my $fh2 = new IO::Compress::Gzip $_."_2.gz" or next;
+#    open my $fh1, '>', $_."_1" or next;
+#    open my $fh2, '>', $_."_2" or next;
+    $file_handles{$_."_1"} = $fh1;
+    $file_handles{$_."_2"} = $fh2;
+  }
+  return %file_handles;
+}
